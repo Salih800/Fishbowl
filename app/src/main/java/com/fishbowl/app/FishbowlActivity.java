@@ -299,6 +299,8 @@ public final class FishbowlActivity extends AppCompatActivity
     private Button setupRetryBtn;
     private Button setupDismissBtn;
     private TextView setupLogSummaryText;
+    // True only when the overlay was opened explicitly (Settings -> View Setup) for previewing.
+    private boolean setupPreviewMode = false;
 
     // Throttled Log Handler (Section 4 UI Thread Protection)
     private final android.os.Handler logUpdateHandler = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -1078,8 +1080,10 @@ public final class FishbowlActivity extends AppCompatActivity
         // Continue to FishBowl button (Shown when setup is completed or previewed)
         setupDismissBtn = createPixelButton("CONTINUE TO FISHBOWL", getAccentColor(), Color.WHITE);
         setupDismissBtn.setOnClickListener(v -> {
+            setupPreviewMode = false;
             setupOverlayView.setVisibility(View.GONE);
             setChromeVisibilityForSetup(false);
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             renderActiveTab();
         });
         setupDismissBtn.setVisibility(View.GONE);
@@ -1138,6 +1142,9 @@ public final class FishbowlActivity extends AppCompatActivity
 
     public void showSetupOverlay(boolean allowDismiss) {
         if (setupOverlayView == null) return;
+        // Explicit preview from Settings should stay on screen even when the runtime is ready;
+        // the automatic overlay (startup/extraction) must disappear as soon as we are initialized.
+        setupPreviewMode = allowDismiss;
         setChromeVisibilityForSetup(true);
         renderSetupOverlayState();
         if (setupDismissBtn != null) {
@@ -1164,7 +1171,7 @@ public final class FishbowlActivity extends AppCompatActivity
             ensureBootstrapStartedIfNeeded();
         }
 
-        if (!showOverlay && (setupDismissBtn == null || setupDismissBtn.getVisibility() != View.VISIBLE)) {
+        if (!showOverlay && !setupPreviewMode) {
             setupOverlayView.setVisibility(View.GONE);
             setChromeVisibilityForSetup(false);
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -4961,6 +4968,54 @@ public final class FishbowlActivity extends AppCompatActivity
         }
     }
 
+    private static final String TERMUX_PACKAGES_INDEX_URL =
+            "https://packages-cf.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages";
+    private static final String TERMUX_TRANSMISSION_FALLBACK_URL =
+            "https://packages-cf.termux.dev/apt/termux-main/pool/main/t/transmission/transmission_4.1.4_aarch64.deb";
+
+    /**
+     * Resolves the current aarch64 .deb URL of the Termux "transmission" package from the repo
+     * index. The previous hard-coded 4.1.3 URL stopped existing when Termux bumped the package to
+     * 4.1.4, which made every Transmission install fail with an HTTP 404.
+     */
+    private static String resolveTransmissionDebUrl() {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(TERMUX_PACKAGES_INDEX_URL).openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(30000);
+            conn.setRequestProperty("User-Agent", "Fishbowl");
+            if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                try (InputStream in = conn.getInputStream()) {
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
+                }
+                String index = new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+                for (String block : index.split("\n\n")) {
+                    if (!(block.startsWith("Package: transmission\n") || block.contains("\nPackage: transmission\n"))) {
+                        continue;
+                    }
+                    for (String line : block.split("\n")) {
+                        if (line.startsWith("Filename: ")) {
+                            String filename = line.substring("Filename: ".length()).trim();
+                            if (!filename.isEmpty()) {
+                                Log.i(TAG, "Resolved Termux transmission package: " + filename);
+                                return "https://packages-cf.termux.dev/apt/termux-main/" + filename;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not resolve transmission package index: " + t.getMessage());
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        return TERMUX_TRANSMISSION_FALLBACK_URL;
+    }
+
     private void installServiceAutomatically(ManagedService svc) {
         OledProgressDialog progress = showOledProgressDialog("INSTALLING " + svc.getDisplayName().toUpperCase(Locale.ROOT), "Preparing runtime environment...");
 
@@ -5020,7 +5075,7 @@ public final class FishbowlActivity extends AppCompatActivity
                 if ("transmission".equalsIgnoreCase(id)) {
                     runOnUiThread(() -> progress.setMessage("Downloading Transmission daemon..."));
                     File cacheDeb = new File(getCacheDir(), "transmission.deb");
-                    String trUrl = "https://packages-cf.termux.dev/apt/termux-main/pool/main/t/transmission/transmission_4.1.3_aarch64.deb";
+                    String trUrl = resolveTransmissionDebUrl();
                     downloadWithRedirects(trUrl, cacheDeb, (current, total) -> {
                         if (total > 0) {
                             int pct = (int) ((current * 100) / total);
@@ -5031,6 +5086,10 @@ public final class FishbowlActivity extends AppCompatActivity
                     runOnUiThread(() -> progress.setMessage("Extracting & configuring Transmission..."));
                     extractDebPackage(cacheDeb, prefix);
                     cacheDeb.delete();
+
+                    // The Termux transmission package depends on libpsl/libminiupnpc/libnatpmp,
+                    // which are not part of the bundled bootstrap and are not resolvable without dpkg.
+                    MediaServiceManager.getInstance(this).ensureBundledNativeLibs();
 
                     File daemon = new File(prefix, "bin/transmission-daemon");
                     if (daemon.exists()) daemon.setExecutable(true, false);
@@ -5080,6 +5139,10 @@ public final class FishbowlActivity extends AppCompatActivity
 
                 extractTarGzArchive(cacheTar, servicesDir);
                 cacheTar.delete();
+
+                // Provide the Bionic Mono.Posix helper before the Servarr payload is prepared,
+                // otherwise the glibc copy bundled by Radarr/Sonarr fails to load ("MonoPosixHelper").
+                MediaServiceManager.getInstance(this).ensureBundledNativeLibs();
 
                 String capName = id.substring(0, 1).toUpperCase(Locale.ROOT) + id.substring(1);
                 File capDir = new File(servicesDir, capName);

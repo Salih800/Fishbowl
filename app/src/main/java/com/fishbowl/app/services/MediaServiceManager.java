@@ -78,6 +78,7 @@ public class MediaServiceManager {
         registerDefaultManifests();
         deploySeerrServiceIfNeeded();
         deployFpcalcIfNeeded();
+        ensureBundledNativeLibs();
         bridgeJellyfinController();
         reconcileRunningServices();
         startDeduplicationWatcher();
@@ -387,6 +388,77 @@ public class MediaServiceManager {
         }
     }
 
+    /**
+     * Deploys the Bionic (Termux-built) native shared libraries that the companion services
+     * require but that are not part of the bundled Jellyfin bootstrap:
+     *
+     *  - libMonoPosixHelper.so : Mono.Posix.NETStandard native helper used by Radarr/Sonarr/Lidarr
+     *    (the copy shipped inside the Servarr tarballs is glibc-linked and cannot be dlopen'ed on
+     *    Android/Bionic, which surfaces as "System.DllNotFoundException: MonoPosixHelper").
+     *  - libpsl.so, libminiupnpc.so, libnatpmp.so.1 : runtime dependencies of the Termux
+     *    transmission-daemon package (the app extracts the .deb without dpkg dependency handling).
+     *
+     * Files are copied into $PREFIX/lib, which is already part of LD_LIBRARY_PATH for every
+     * managed service, and prepareServarrRuntimeConfig() additionally mirrors
+     * libMonoPosixHelper.so into the Servarr application directory.
+     */
+    public synchronized void ensureBundledNativeLibs() {
+        try {
+            File prefixLib = new File(TermuxConstants.TERMUX_PREFIX_DIR, "lib");
+            if (!prefixLib.exists() && !prefixLib.mkdirs()) return;
+
+            String[] libs = {
+                    "libMonoPosixHelper.so",
+                    "libpsl.so",
+                    "libminiupnpc.so",
+                    "libnatpmp.so.1"
+            };
+            int copied = 0;
+            for (String lib : libs) {
+                File target = new File(prefixLib, lib);
+                if (target.exists() && target.length() > 0) continue;
+                try (InputStream in = appContext.getAssets().open("native/arm64-v8a/" + lib);
+                     FileOutputStream out = new FileOutputStream(target)) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                } catch (Throwable t) {
+                    Log.w(TAG, "Could not deploy native lib " + lib + ": " + t.getMessage());
+                    continue;
+                }
+                try {
+                    android.system.Os.chmod(target.getAbsolutePath(), 0644);
+                } catch (Throwable ignored) {}
+                copied++;
+            }
+            if (copied > 0) {
+                Log.i(TAG, "Deployed " + copied + " bundled Bionic native librar(ies) to " + prefixLib.getAbsolutePath());
+            }
+
+            // Newer libc++ shared runtime: the current Termux transmission build requires symbols
+            // (e.g. std::__ndk1::__hash_memory) that the bootstrap's older libc++_shared.so does
+            // not export. It is staged in an isolated directory that is prepended to
+            // LD_LIBRARY_PATH only for Transmission, so Jellyfin/FFmpeg keep the bundled copy.
+            File shimDir = new File(prefixLib, "fishbowl-shim");
+            if (!shimDir.exists() && !shimDir.mkdirs()) return;
+            File shimLibcxx = new File(shimDir, "libc++_shared.so");
+            if (!shimLibcxx.exists() || shimLibcxx.length() == 0) {
+                try (InputStream in = appContext.getAssets().open("native/arm64-v8a/libc++_shared.so");
+                     FileOutputStream out = new FileOutputStream(shimLibcxx)) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                }
+                try {
+                    android.system.Os.chmod(shimLibcxx.getAbsolutePath(), 0644);
+                } catch (Throwable ignored) {}
+                Log.i(TAG, "Deployed libc++ shim for Transmission to " + shimDir.getAbsolutePath());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureBundledNativeLibs failed: " + t.getMessage());
+        }
+    }
+
     private void bridgeJellyfinController() {
         JellyfinController jc = JellyfinController.getInstance();
         ManagedService jfService = services.get("jellyfin");
@@ -582,6 +654,9 @@ public class MediaServiceManager {
             // Ensure configuration exists and is sanitized before process launch
             ensureServiceConfigSanitized(id);
 
+            // Deploy Bionic native libraries required by Servarr (Mono.Posix) and Transmission
+            ensureBundledNativeLibs();
+
             // 2. Pre-flight check: Port conflict
             int port = ms.getManifest().getDefaultPort();
             if (isPortOccupied(port)) {
@@ -729,7 +804,14 @@ public class MediaServiceManager {
                 String jfLib = new File(prefix, "opt/jellyfin/lib").getAbsolutePath();
                 String jfBin = new File(prefix, "opt/jellyfin/bin").getAbsolutePath();
                 String serviceDir = ms.getManifest().getInstallDir();
-                env.put("LD_LIBRARY_PATH", jfLib + ":" + prefixLib + ":" + nativeLibDir + ":" + serviceDir);
+                String ldPath = jfLib + ":" + prefixLib + ":" + nativeLibDir + ":" + serviceDir;
+                if ("transmission".equalsIgnoreCase(id)) {
+                    // Prefer the newer libc++ staged by ensureBundledNativeLibs() over the
+                    // bootstrap copy, which lacks symbols required by transmission-daemon.
+                    File shimDir = new File(prefixLib, "fishbowl-shim");
+                    ldPath = shimDir.getAbsolutePath() + ":" + ldPath;
+                }
+                env.put("LD_LIBRARY_PATH", ldPath);
 
                 String existingPath = env.getOrDefault("PATH", "");
                 env.put("PATH", new File(prefix, "lib/dotnet").getAbsolutePath()
@@ -3003,7 +3085,17 @@ public class MediaServiceManager {
         }
     }
 
+    private final java.util.concurrent.atomic.AtomicBoolean autoWireInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     public void autoWireStack(AutoWireCallback callback) {
+        // Auto-wiring is triggered from onResume, service listeners and the debounced scheduler.
+        // Concurrent runs used to race on Radarr/Sonarr config endpoints, which produced duplicate
+        // Transmission download clients and SQLite UNIQUE constraint failures, so serialize them.
+        if (!autoWireInFlight.compareAndSet(false, true)) {
+            postCallback(callback, true, "Stack sync already in progress");
+            return;
+        }
         serviceExecutor.execute(() -> {
             StringBuilder log = new StringBuilder();
             try {
@@ -3061,6 +3153,8 @@ public class MediaServiceManager {
             } catch (Throwable t) {
                 Log.e(TAG, "[AutoWire] Error during autoWireStack", t);
                 postCallback(callback, false, "Auto-wire notice: " + t.getMessage());
+            } finally {
+                autoWireInFlight.set(false);
             }
         });
     }
@@ -3442,32 +3536,44 @@ public class MediaServiceManager {
             String resp = httpGet(url);
             int existingId = -1;
             boolean needsUpdate = false;
+            List<Integer> duplicateIds = new ArrayList<>();
             if (resp != null && resp.trim().startsWith("[")) {
                 JSONArray arr = new JSONArray(resp);
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject client = arr.optJSONObject(i);
-                    if (client != null && "Transmission".equalsIgnoreCase(client.optString("name"))) {
-                        existingId = client.optInt("id", -1);
-                        JSONArray fields = client.optJSONArray("fields");
-                        boolean hasDir = false;
-                        if (fields != null) {
-                            String dirField = "radarr".equalsIgnoreCase(forService) ? "movieDirectory"
-                                    : ("lidarr".equalsIgnoreCase(forService) ? "musicDirectory" : "tvDirectory");
-                            for (int j = 0; j < fields.length(); j++) {
-                                JSONObject f = fields.optJSONObject(j);
-                                if (f != null && dirField.equalsIgnoreCase(f.optString("name"))) {
-                                    String val = f.optString("value", "");
-                                    if (val != null && !val.trim().isEmpty()) {
-                                        hasDir = true;
-                                    }
+                    if (client == null || !"Transmission".equalsIgnoreCase(client.optString("name"))) {
+                        continue;
+                    }
+                    int clientId = client.optInt("id", -1);
+                    if (existingId > 0) {
+                        // Older builds could create more than one client during concurrent syncs.
+                        if (clientId > 0) duplicateIds.add(clientId);
+                        continue;
+                    }
+                    existingId = clientId;
+                    JSONArray fields = client.optJSONArray("fields");
+                    boolean hasDir = false;
+                    if (fields != null) {
+                        String dirField = "radarr".equalsIgnoreCase(forService) ? "movieDirectory"
+                                : ("lidarr".equalsIgnoreCase(forService) ? "musicDirectory" : "tvDirectory");
+                        for (int j = 0; j < fields.length(); j++) {
+                            JSONObject f = fields.optJSONObject(j);
+                            if (f != null && dirField.equalsIgnoreCase(f.optString("name"))) {
+                                String val = f.optString("value", "");
+                                if (val != null && !val.trim().isEmpty()) {
+                                    hasDir = true;
                                 }
                             }
                         }
-                        if (!hasDir) {
-                            needsUpdate = true;
-                        }
-                        break;
                     }
+                    if (!hasDir) {
+                        needsUpdate = true;
+                    }
+                }
+            }
+            for (Integer dupId : duplicateIds) {
+                if (httpDelete("http://127.0.0.1:" + port + apiPrefix + "/downloadclient/" + dupId + "?apiKey=" + apiKey)) {
+                    Log.i(TAG, "Removed duplicate Transmission download client #" + dupId + " from " + forService);
                 }
             }
             String body = buildTransmissionClientJson(forService);

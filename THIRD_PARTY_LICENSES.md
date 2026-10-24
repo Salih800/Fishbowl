@@ -18,7 +18,7 @@ In accordance with Section 6 of the GNU General Public License v3.0 (*Conveying 
 | **Radarr** | `6.4.4` (ARM64) | [Radarr/Radarr](https://github.com/Radarr/Radarr) | GNU GPLv3 |
 | **Sonarr** | `4.0.9` (ARM64) | [Sonarr/Sonarr](https://github.com/Sonarr/Sonarr) | GNU GPLv3 |
 | **Prowlarr** | `1.21.2` (ARM64) | [Prowlarr/Prowlarr](https://github.com/Prowlarr/Prowlarr) | GNU GPLv3 |
-| **Transmission Daemon** | `4.1.3` (ARM64 Bionic) | [transmission/transmission](https://github.com/transmission/transmission) | GNU GPLv2 / GPLv3 |
+| **Transmission Daemon** | `4.1.4` (ARM64 Bionic) | [transmission/transmission](https://github.com/transmission/transmission) | GNU GPLv2 / GPLv3 |
 | **Seerr (Jellyseerr)** | `2.2.0` (ARM64) | [fallenbagel/jellyseerr](https://github.com/fallenbagel/jellyseerr) | MIT License |
 | **Lidarr** | `2.8.2` (ARM64) | [Lidarr/Lidarr](https://github.com/Lidarr/Lidarr) | GNU GPLv3 |
 | **SQLite3 Database Engine** | `3.46.1` (`libe_sqlite3.so`) | [sqlite/sqlite](https://sqlite.org) | Public Domain |
@@ -27,6 +27,11 @@ In accordance with Section 6 of the GNU General Public License v3.0 (*Conveying 
 | **OpenSSL Security Engine** | `3.x` (`libcrypto.so` / `libssl.so`) | [openssl/openssl](https://www.openssl.org) | Apache License 2.0 |
 | **ICU Globalization Engine** | `74.x` | [unicode-org/icu](https://icu.unicode.org) | Unicode-DFS-2016 |
 | **Termux Bootstrap Archive** | `2026.02.12-r1` (Android 7+) | [termux/termux-packages](https://github.com/termux/termux-packages) | GNU GPLv3 |
+| **Mono.Posix Native Helper** | `6.14.1` (`libMonoPosixHelper.so`, ARM64 Bionic) | [mono/mono](https://github.com/mono/mono) | MIT License |
+| **LLVM libc++** | `30` (`libc++_shared.so`, ARM64 Bionic) | [llvm/llvm-project](https://github.com/llvm/llvm-project) | Apache License 2.0 with LLVM Exception |
+| **libpsl** | `0.23.3` (`libpsl.so`, ARM64 Bionic) | [rockdaboot/libpsl](https://github.com/rockdaboot/libpsl) | MIT License |
+| **MiniUPnPc** | `2.3.3` (`libminiupnpc.so`, ARM64 Bionic) | [miniupnp/miniupnp](https://github.com/miniupnp/miniupnp) | BSD 3-Clause |
+| **libnatpmp** | `20230423` (`libnatpmp.so.1`, ARM64 Bionic) | [miniupnp/miniupnp](https://github.com/miniupnp/miniupnp) | BSD 3-Clause |
 | **Apache Commons Compress** | `1.26.0` | [apache/commons-compress](https://github.com/apache/commons-compress) | Apache License 2.0 |
 | **XZ for Java** | `1.9` | [tukaani-project/xz-java](https://tukaani.org/xz/java.html) | Public Domain |
 | **Markwon Markdown Library** | `4.6.2` | [noties/Markwon](https://github.com/noties/Markwon) | Apache License 2.0 |
@@ -119,6 +124,28 @@ In accordance with Section 6 of the GNU General Public License v3.0 (*Conveying 
 - **Copyright:** (c) The Android Open Source Project
 - **License:** Apache License, Version 2.0
 - **Source:** <https://android.googlesource.com>
+
+### Bundled Bionic Companion Runtime Libraries
+These Termux-built (Bionic) shared libraries are bundled because the corresponding upstream
+tarballs/`.deb` payloads either ship glibc-only binaries or depend on libraries missing from the
+Jellyfin bootstrap. They are loaded only by the companion services (Servarr, Transmission).
+
+- **Mono.Posix Native Helper** (`libMonoPosixHelper.so`)
+  - **Copyright:** (c) 2001–2026 Mono Project Contributors / .NET Foundation
+  - **License:** MIT License
+  - **Source:** <https://github.com/mono/mono> (Termux package `mono 6.14.1-2`)
+- **LLVM libc++** (`libc++_shared.so`)
+  - **Copyright:** (c) 2009–2026 LLVM Project
+  - **License:** Apache License 2.0 with LLVM Exception
+  - **Source:** <https://github.com/llvm/llvm-project> (Termux package `libc++ 30`)
+- **libpsl** (`libpsl.so`)
+  - **Copyright:** (c) 2014–2026 Tim Rühsen and contributors
+  - **License:** MIT License
+  - **Source:** <https://github.com/rockdaboot/libpsl> (Termux package `libpsl 0.23.3`)
+- **MiniUPnPc / libnatpmp** (`libminiupnpc.so`, `libnatpmp.so.1`)
+  - **Copyright:** (c) 2005–2026 Thomas Bernard
+  - **License:** BSD 3-Clause
+  - **Source:** <https://github.com/miniupnp/miniupnp> (Termux packages `miniupnpc 2.3.3-1`, `natpmpc 20230423-2`)
 
 ---
 

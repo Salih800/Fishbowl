@@ -7,6 +7,8 @@ build/
 release/
 *.apk
 *.so
+# Bundled Bionic companion libraries (runtime dependency, see THIRD_PARTY_LICENSES.md)
+!app/src/main/assets/native/**/*.so
 .externalNativeBuild
 .cxx
 *.zip

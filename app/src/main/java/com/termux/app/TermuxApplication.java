@@ -70,6 +70,14 @@ public class TermuxApplication extends Application {
 
         if (isTermuxFilesDirectoryAccessible) {
             TermuxShellEnvironment.writeEnvironmentToFile(this);
+
+            // The bundled prefix is a repackaged Termux bootstrap: repair hard-coded
+            // /data/data/com.termux shebangs and symlinks so the in-app terminal can start.
+            new Thread(() -> {
+                try {
+                    com.fishbowl.app.JellyfinBootstrapper.repairTermuxScriptPaths();
+                } catch (Throwable ignored) {}
+            }, "fishbowl-prefix-repair").start();
         }
     }
 

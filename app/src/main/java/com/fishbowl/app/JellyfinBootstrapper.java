@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -467,9 +468,13 @@ public class JellyfinBootstrapper {
                 return false;
             }
 
+            // The bundled bootstrap is a repackaged Termux prefix and therefore contains shell
+            // scripts whose shebangs and absolute symlinks still point at /data/data/com.termux.
+            // Rewrite them to this app's prefix so the built-in terminal (bin/login) works.
+            repairTermuxScriptPaths();
+
             ensureNetworkConfig(context);
-            Log.i(TAG, "Jellyfin self-contained environment initialized successfully!");
-            if (callback != null) {
+            Log.i(TAG, "Jellyfin self-contained environment initialized successfully!");            if (callback != null) {
                 callback.onProgress("Runtime installation complete!", 100);
             }
             return true;
@@ -492,6 +497,80 @@ public class JellyfinBootstrapper {
                     wakeLock.release();
                 } catch (Exception ignored) {}
             }
+        }
+    }
+
+    /**
+     * Repairs Termux bootstrap artifacts that hard-code the original /data/data/com.termux prefix:
+     * shell scripts with a com.termux shebang (e.g. bin/login, which is what TermuxService execs)
+     * and absolute symlink targets pointing into the old prefix. Without this, the in-app terminal
+     * fails with "exec(.../bin/login): Permission denied" because the shebang resolves inside the
+     * separately installed com.termux app's private directory.
+     */
+    public static void repairTermuxScriptPaths() {
+        try {
+            File prefix = TermuxConstants.TERMUX_PREFIX_DIR;
+            File binDir = new File(prefix, "bin");
+            if (!binDir.isDirectory()) return;
+
+            final String oldPrefix = "/data/data/com.termux/files/usr";
+            final String newPrefix = prefix.getAbsolutePath();
+            if (oldPrefix.equals(newPrefix)) return;
+
+            int rewritten = 0;
+            int relinked = 0;
+
+            File[] files = binDir.listFiles();
+            if (files == null) return;
+
+            for (File file : files) {
+                if (file.isDirectory()) continue;
+
+                // 1. Re-point absolute symlinks that still target the com.termux prefix.
+                try {
+                    String linkTarget = Os.readlink(file.getAbsolutePath());
+                    if (linkTarget != null && linkTarget.startsWith(oldPrefix)) {
+                        String fixed = newPrefix + linkTarget.substring(oldPrefix.length());
+                        file.delete();
+                        Os.symlink(fixed, file.getAbsolutePath());
+                        relinked++;
+                        continue;
+                    }
+                } catch (Throwable ignored) {
+                    // Not a symlink (readlink throws for regular files) - fall through.
+                }
+
+                if (file.length() <= 0 || file.length() > 512 * 1024) continue;
+
+                // 2. Rewrite com.termux paths inside small scripts that start with a shebang.
+                byte[] data;
+                try {
+                    data = java.nio.file.Files.readAllBytes(file.toPath());
+                } catch (Throwable t) {
+                    continue;
+                }
+                if (data.length < 2 || data[0] != '#' || data[1] != '!') continue;
+
+                String text = new String(data, StandardCharsets.UTF_8);
+                if (!text.contains(oldPrefix)) continue;
+
+                String fixedText = text.replace(oldPrefix, newPrefix);
+                try {
+                    try (FileOutputStream fos = new FileOutputStream(file)) {
+                        fos.write(fixedText.getBytes(StandardCharsets.UTF_8));
+                    }
+                    Os.chmod(file.getAbsolutePath(), 0755);
+                    rewritten++;
+                } catch (Throwable t) {
+                    Log.w(TAG, "Could not rewrite script " + file.getName() + ": " + t.getMessage());
+                }
+            }
+
+            if (rewritten > 0 || relinked > 0) {
+                Log.i(TAG, "Repaired Termux bootstrap paths (scripts=" + rewritten + ", symlinks=" + relinked + ")");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "repairTermuxScriptPaths failed: " + t.getMessage());
         }
     }
 }
